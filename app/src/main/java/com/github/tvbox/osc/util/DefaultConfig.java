@@ -6,19 +6,17 @@ import android.content.pm.PackageManager;
 import android.text.TextUtils;
 
 import com.github.tvbox.osc.api.ApiConfig;
-import com.github.tvbox.osc.base.App;
 import com.github.tvbox.osc.bean.MovieSort;
 import com.github.tvbox.osc.bean.SourceBean;
-import com.github.tvbox.osc.server.RemoteServer;
+import com.github.tvbox.osc.server.ControlManager;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * @author pj567
@@ -29,14 +27,16 @@ public class DefaultConfig {
 
     public static List<MovieSort.SortData> adjustSort(String sourceKey, List<MovieSort.SortData> list, boolean withMy) {
         List<MovieSort.SortData> data = new ArrayList<>();
-        SourceBean sb = ApiConfig.get().getSource(sourceKey);
-        HashMap<String, Integer> tidSort = sb.getTidSort();
-        for (MovieSort.SortData sortData : list) {
-            // 默认排序 1000
-            sortData.sort = 1000;
-            if (tidSort != null && tidSort.containsKey(sortData.id))
-                sortData.sort = tidSort.get(sortData.id);
-            data.add(sortData);
+        if (sourceKey != null) {
+            SourceBean sb = ApiConfig.get().getSource(sourceKey);
+            HashMap<String, Integer> tidSort = sb.getTidSort();
+            for (MovieSort.SortData sortData : list) {
+                // 默认排序 1000
+                sortData.sort = 1000;
+                if (tidSort != null && tidSort.containsKey(sortData.id))
+                    sortData.sort = tidSort.get(sortData.id);
+                data.add(sortData);
+            }
         }
         if (withMy)
             data.add(0, new MovieSort.SortData("my0", "我的"));
@@ -96,29 +96,21 @@ public class DefaultConfig {
         return start > -1 ? fileName.substring(0, start) : fileName;
     }
 
-    public static boolean isVideoFormat(String urlOri) {
-        String url = urlOri.toLowerCase();
+
+    private static final Pattern snifferMatch = Pattern.compile("http((?!http).){26,}?\\.(m3u8|mp4)\\?.*|http((?!http).){26,}\\.(m3u8|mp4)|http((?!http).){26,}?/m3u8\\?pt=m3u8.*|http((?!http).)*?default\\.ixigua\\.com/.*|http((?!http).)*?cdn-tos[^\\?]*|http((?!http).)*?/obj/tos[^\\?]*|http.*?/player/m3u8play\\.php\\?url=.*|http.*?/player/.*?[pP]lay\\.php\\?url=.*|http.*?/playlist/m3u8/\\?vid=.*|http.*?\\.php\\?type=m3u8&.*|http.*?/download.aspx\\?.*|http.*?/api/up_api.php\\?.*|https.*?\\.66yk\\.cn.*|http((?!http).)*?netease\\.com/file/.*");
+
+    public static boolean isVideoFormat(String url) {
         if (url.contains("=http") || url.contains("=https") || url.contains("=https%3a%2f") || url.contains("=http%3a%2f")) {
             return false;
         }
-        Iterator<String> keys = videoFormatList.keySet().iterator();
-        while (keys.hasNext()) {
-            String format = keys.next();
-            if (url.contains(format)) {
-                LOG.i("isVideoFormat url:" + urlOri);
-                return true;
+        if (snifferMatch.matcher(url).find()) {
+            if (url.contains("cdn-tos") && (url.contains(".js") || url.contains(".css"))) {
+                return false;
             }
+            return true;
         }
         return false;
     }
-
-    private static final HashMap videoFormatList = new HashMap<String, List<String>>() {{
-        put(".m3u8", Arrays.asList("application/octet-stream", "application/vnd.apple.mpegurl", "application/mpegurl", "application/x-mpegurl", "audio/mpegurl", "audio/x-mpegurl"));
-        put(".mp4", Arrays.asList("video/mp4", "application/mp4", "video/h264"));
-        put(".flv", Arrays.asList("video/x-flv"));
-        put(".f4v", Arrays.asList("video/x-f4v"));
-        put(".mpeg", Arrays.asList("video/vnd.mpegurl"));
-    }};
 
 
     public static String safeJsonString(JsonObject obj, String key, String defaultVal) {
@@ -162,7 +154,7 @@ public class DefaultConfig {
 
     public static String checkReplaceProxy(String urlOri) {
         if (urlOri.startsWith("proxy://"))
-            return urlOri.replace("proxy://", RemoteServer.getServerAddress(App.getInstance()) + "proxy?");
+            return urlOri.replace("proxy://", ControlManager.get().getAddress(true) + "proxy?");
         return urlOri;
     }
 }

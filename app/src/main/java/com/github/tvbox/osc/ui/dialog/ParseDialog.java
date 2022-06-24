@@ -1,14 +1,13 @@
 package com.github.tvbox.osc.ui.dialog;
 
+import android.app.Activity;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.graphics.Color;
-import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Handler;
-import android.text.TextUtils;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -27,13 +26,13 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.IdRes;
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.github.tvbox.osc.R;
 import com.github.tvbox.osc.api.ApiConfig;
 import com.github.tvbox.osc.bean.ParseBean;
-import com.github.tvbox.osc.bean.SourceBean;
 import com.github.tvbox.osc.ui.adapter.ParseDialogAdapter;
 import com.github.tvbox.osc.util.AdBlocker;
 import com.github.tvbox.osc.util.DefaultConfig;
@@ -42,10 +41,14 @@ import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.LOG;
 import com.github.tvbox.osc.util.XWalkUtils;
 import com.lzy.okgo.OkGo;
+import com.lzy.okgo.callback.AbsCallback;
+import com.lzy.okgo.model.Response;
 import com.orhanobut.hawk.Hawk;
 import com.owen.tvrecyclerview.widget.TvRecyclerView;
 import com.owen.tvrecyclerview.widget.V7GridLayoutManager;
 
+import org.json.JSONException;
+import org.json.JSONObject;
 import org.xwalk.core.XWalkResourceClient;
 import org.xwalk.core.XWalkSettings;
 import org.xwalk.core.XWalkUIClient;
@@ -56,8 +59,12 @@ import org.xwalk.core.XWalkWebResourceResponse;
 import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import me.jessyan.autosize.AutoSize;
 
 /**
  * @author pj567
@@ -84,6 +91,7 @@ public class ParseDialog {
     private Runnable mParseTimeOut = new Runnable() {
         @Override
         public void run() {
+            OkGo.getInstance().cancelTag("json_jx");
             Toast.makeText(mContext, "解析超时，请尝试切换解析重试!", Toast.LENGTH_SHORT).show();
         }
     };
@@ -152,15 +160,37 @@ public class ParseDialog {
         void fail();
     }
 
-    public void parse(String sourceKey, String flag, String url, ParseCallback callback) {
-        Uri uir = Uri.parse(url);
-        String urlPath = uir.getPath();
-        String format = DefaultConfig.getFileSuffix(urlPath);
-        SourceBean sb = ApiConfig.get().getSource(sourceKey);
-        if (DefaultConfig.isVideoFormat(format)) {
-            callback.success(url, null);
-        } else { // 解析咯
-            initParse(sourceKey, flag, url, callback);
+    public void parse(String sourceKey, JSONObject info, ParseCallback callback) {
+        try {
+            boolean parse = info.optString("parse", "1").equals("1");
+            boolean jx = info.optString("jx", "0").equals("1");
+            String playUrl = info.optString("playUrl", "");
+            String flag = info.optString("flag");
+            String url = info.getString("url");
+            HashMap<String, String> headers = null;
+            if (info.has("header")) {
+                try {
+                    JSONObject hds = new JSONObject(info.getString("header"));
+                    Iterator<String> keys = hds.keys();
+                    while (keys.hasNext()) {
+                        String key = keys.next();
+                        if (headers == null) {
+                            headers = new HashMap<>();
+                        }
+                        headers.put(key, hds.getString(key));
+                    }
+                } catch (Throwable th) {
+
+                }
+            }
+            if (parse || jx) {
+                boolean userJxList = (playUrl.isEmpty() && ApiConfig.get().getVipParseFlags().contains(flag)) || jx;
+                initParse(flag, userJxList, playUrl, url, callback);
+            } else {
+                callback.success(playUrl + url, headers);
+            }
+        } catch (Throwable th) {
+            callback.fail();
         }
     }
 
@@ -169,7 +199,7 @@ public class ParseDialog {
     private WebView mSysWebView;
     private SysWebClient mSysWebClient;
 
-    private void initParse(String sourceKey, String flag, String url, ParseCallback callback) {
+    private void initParse(String flag, boolean userJx, String playUrl, String url, ParseCallback callback) {
         mParseTip.setText("资源解析中，请稍后");
         if (mSysWebView == null && mX5WebView == null) {
             boolean useSystemWebView = Hawk.get(HawkConfig.PARSE_WEBVIEW, true);
@@ -178,65 +208,260 @@ public class ParseDialog {
                     @Override
                     public void success() {
                         initWebView(false);
-                        initParseBean(sourceKey, flag, url, callback);
+                        initParseBean(flag, userJx, playUrl, url, callback);
                     }
 
                     @Override
                     public void fail() {
                         Toast.makeText(mContext, "XWalkView不兼容，已替换为系统自带WebView", Toast.LENGTH_LONG).show();
                         initWebView(true);
-                        initParseBean(sourceKey, flag, url, callback);
+                        initParseBean(flag, userJx, playUrl, url, callback);
                     }
 
                     @Override
                     public void ignore() {
                         Toast.makeText(mContext, "XWalkView运行组件未下载，已替换为系统自带WebView", Toast.LENGTH_LONG).show();
                         initWebView(true);
-                        initParseBean(sourceKey, flag, url, callback);
+                        initParseBean(flag, userJx, playUrl, url, callback);
                     }
                 });
             } else {
                 initWebView(true);
-                initParseBean(sourceKey, flag, url, callback);
+                initParseBean(flag, userJx, playUrl, url, callback);
             }
         } else {
-            initParseBean(sourceKey, flag, url, callback);
+            initParseBean(flag, userJx, playUrl, url, callback);
         }
     }
 
     private void initWebView(boolean useSystemWebView) {
         if (useSystemWebView) {
-            mSysWebView = new WebView(mContext);
+            mSysWebView = new MyWebView(mContext);
             configWebViewSys(mSysWebView);
         } else {
-            mX5WebView = new XWalkView(mContext);
+            mX5WebView = new MyXWalkView(mContext);
             configWebViewX5(mX5WebView);
         }
     }
 
-    private void loadUrl(String url, ParseCallback callback) {
-        if (mSysWebClient != null) {
-            mSysWebClient.setCallback(callback);
+    class MyWebView extends WebView {
+        public MyWebView(@NonNull Context context) {
+            super(context);
         }
-        if (mX5WebClient != null) {
-            mX5WebClient.setCallback(callback);
+
+        @Override
+        public void setOverScrollMode(int mode) {
+            super.setOverScrollMode(mode);
+            if (mContext instanceof Activity)
+                AutoSize.autoConvertDensityOfGlobal((Activity) mContext);
         }
-        if (mX5WebView != null) {
-            mX5WebView.stopLoading();
-            mX5WebView.clearCache(true);
-            mX5WebView.loadUrl(url);
+
+        @Override
+        public boolean dispatchKeyEvent(KeyEvent event) {
+            return false;
         }
-        if (mSysWebView != null) {
-            mSysWebView.stopLoading();
-            mSysWebView.clearCache(true);
-            mSysWebView.loadUrl(url);
+    }
+
+    class MyXWalkView extends XWalkView {
+        public MyXWalkView(Context context) {
+            super(context);
+        }
+
+        @Override
+        public void setOverScrollMode(int mode) {
+            super.setOverScrollMode(mode);
+            if (mContext instanceof Activity)
+                AutoSize.autoConvertDensityOfGlobal((Activity) mContext);
+        }
+
+        @Override
+        public boolean dispatchKeyEvent(KeyEvent event) {
+            return false;
+        }
+    }
+
+    JSONObject jsonParse(String input, String json) throws JSONException {
+        JSONObject jsonPlayData = new JSONObject(json);
+        String url = jsonPlayData.getString("url");
+        String msg = jsonPlayData.optString("msg", "");
+        if (url.startsWith("//")) {
+            url = "https:" + url;
+        }
+        if (!url.startsWith("http")) {
+            return null;
+        }
+        JSONObject headers = new JSONObject();
+        String ua = jsonPlayData.optString("user-agent", "");
+        if (ua.trim().length() > 0) {
+            headers.put("User-Agent", " " + ua);
+        }
+        String referer = jsonPlayData.optString("referer", "");
+        if (referer.trim().length() > 0) {
+            headers.put("Referer", " " + referer);
+        }
+        JSONObject taskResult = new JSONObject();
+        taskResult.put("header", headers);
+        taskResult.put("url", url);
+        return taskResult;
+    }
+
+    private void doJsonJx(String jx, String url, ParseCallback callback) {
+        OkGo.<String>get(jx + url)
+                .tag("json_jx")
+                .execute(new AbsCallback<String>() {
+                    @Override
+                    public String convertResponse(okhttp3.Response response) throws Throwable {
+                        if (response.body() != null) {
+                            return response.body().string();
+                        } else {
+                            throw new IllegalStateException("网络请求错误");
+                        }
+                    }
+
+                    @Override
+                    public void onSuccess(Response<String> response) {
+                        String json = response.body();
+                        try {
+                            JSONObject rs = jsonParse(url, json);
+                            HashMap<String, String> headers = null;
+                            if (rs.has("header")) {
+                                try {
+                                    JSONObject hds = rs.getJSONObject("header");
+                                    Iterator<String> keys = hds.keys();
+                                    while (keys.hasNext()) {
+                                        String key = keys.next();
+                                        if (headers == null) {
+                                            headers = new HashMap<>();
+                                        }
+                                        headers.put(key, hds.getString(key));
+                                    }
+                                } catch (Throwable th) {
+
+                                }
+                            }
+                            callback.success(rs.getString("url"), headers);
+                        } catch (JSONException e) {
+                            e.printStackTrace();
+                            callback.fail();
+                        }
+                    }
+
+                    @Override
+                    public void onError(Response<String> response) {
+                        super.onError(response);
+                        callback.fail();
+                    }
+                });
+    }
+
+    private void loadUrl(ParseBean pb, String flag, String url, ParseCallback callback) {
+        if (pb == null || pb.getType() == 0) {
+            if (mSysWebClient != null) {
+                mSysWebClient.setCallback(callback);
+            }
+            if (mX5WebClient != null) {
+                mX5WebClient.setCallback(callback);
+            }
+            if (mX5WebView != null) {
+                mX5WebView.stopLoading();
+                mX5WebView.clearCache(true);
+                mX5WebView.loadUrl(url);
+            }
+            if (mSysWebView != null) {
+                mSysWebView.stopLoading();
+                mSysWebView.clearCache(true);
+                mSysWebView.loadUrl(url);
+            }
+        } else if (pb.getType() == 1) { // json 解析
+            doJsonJx(pb.getUrl(), url, callback);
+        } else if (pb.getType() == 2) { // json 扩展
+            LinkedHashMap<String, String> jxs = new LinkedHashMap<>();
+            for (ParseBean p : ApiConfig.get().getParseBeanList()) {
+                if (p.getType() == 1) {
+                    jxs.put(p.getName(), p.mixUrl());
+                }
+            }
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    JSONObject rs = ApiConfig.get().jsonExt(pb.getUrl(), jxs, url);
+                    if (rs == null || !rs.has("url")) {
+                        callback.fail();
+                    } else {
+                        HashMap<String, String> headers = null;
+                        if (rs.has("header")) {
+                            try {
+                                JSONObject hds = rs.getJSONObject("header");
+                                Iterator<String> keys = hds.keys();
+                                while (keys.hasNext()) {
+                                    String key = keys.next();
+                                    if (headers == null) {
+                                        headers = new HashMap<>();
+                                    }
+                                    headers.put(key, hds.getString(key));
+                                }
+                            } catch (Throwable th) {
+
+                            }
+                        }
+                        boolean parseWV = rs.optInt("parse", 0) == 1;
+                        if (parseWV) {
+                            String wvUrl = DefaultConfig.checkReplaceProxy(rs.optString("url", ""));
+                            loadUrl(null, flag, wvUrl, callback);
+                        } else {
+                            callback.success(rs.optString("url", ""), headers);
+                        }
+                    }
+                }
+            }).start();
+        } else if (pb.getType() == 3) { // json 聚合
+            LinkedHashMap<String, HashMap<String, String>> jxs = new LinkedHashMap<>();
+            String extendName = "";
+            for (ParseBean p : ApiConfig.get().getParseBeanList()) {
+                HashMap data = new HashMap<String, String>();
+                data.put("url", p.getUrl());
+                if (p.getUrl().equals(pb.getUrl())) {
+                    extendName = p.getName();
+                }
+                data.put("type", p.getType() + "");
+                data.put("ext", p.getExt());
+                jxs.put(p.getName(), data);
+            }
+            String finalExtendName = extendName;
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    JSONObject rs = ApiConfig.get().jsonExtMix(flag, pb.getUrl(), finalExtendName, jxs, url);
+                    if (rs == null || !rs.has("url")) {
+                        callback.fail();
+                    } else {
+                        HashMap<String, String> headers = null;
+                        if (rs.has("header")) {
+                            try {
+                                JSONObject hds = rs.getJSONObject("header");
+                                Iterator<String> keys = hds.keys();
+                                while (keys.hasNext()) {
+                                    String key = keys.next();
+                                    if (headers == null) {
+                                        headers = new HashMap<>();
+                                    }
+                                    headers.put(key, hds.getString(key));
+                                }
+                            } catch (Throwable th) {
+
+                            }
+                        }
+                        callback.success(rs.optString("url", ""), headers);
+                    }
+                }
+            }).start();
         }
         mHandler.removeCallbacks(mParseTimeOut);
         mHandler.postDelayed(mGridFocus, 200);
         mHandler.postDelayed(mParseTimeOut, 30000);
     }
 
-    private void initParseBean(String sourceKey, String flag, final String url, ParseCallback callback) {
+    private void initParseBean(String flag, boolean userJx, String playUrl, final String url, ParseCallback callback) {
         if (mGridView == null) {
             mGridView = findViewById(R.id.mGridView);
             parseAdapter = new ParseDialogAdapter();
@@ -253,7 +478,7 @@ public class ParseDialog {
                     ApiConfig.get().setDefaultParse(parseBean);
                     parseAdapter.notifyItemChanged(position);
                     loadFound = false;
-                    loadUrl(parseBean.getUrl() + url, callback);
+                    loadUrl(parseBean, flag, url, callback);
                 }
             });
             mGridView.setOnInBorderKeyEventListener(new TvRecyclerView.OnInBorderKeyEventListener() {
@@ -264,30 +489,30 @@ public class ParseDialog {
             });
         }
         int focusParseIdx = 0;
-        SourceBean sb = ApiConfig.get().getSource(sourceKey);
         String parseUrl = "";
-        if (ApiConfig.get().getVipParseFlags().contains(flag) || TextUtils.isEmpty(flag)) {
+        ParseBean parseBean = null;
+        if (userJx) {
             parseBeans.addAll(ApiConfig.get().getParseBeanList());
-            ParseBean parseBean = ApiConfig.get().getDefaultParse();
+            parseBean = ApiConfig.get().getDefaultParse();
             parseUrl = parseBean.getUrl();
             focusParseIdx = parseBeans.indexOf(parseBean);
         } else {
-            parseUrl = sb == null ? "" : sb.getPlayerUrl();
+            parseUrl = playUrl;
             focusParseIdx = 0;
         }
         loadFound = false;
         parseAdapter.setNewData(parseBeans);
         mGridView.setSelection(focusParseIdx);
-        final String fullParseUrl = parseUrl + url;
         if (parseBeans.size() > 0) {
+            ParseBean finalParseBean = parseBean;
             mHandler.postDelayed(new Runnable() {
                 @Override
                 public void run() {
-                    loadUrl(fullParseUrl, callback);
+                    loadUrl(finalParseBean, flag, url, callback);
                 }
             }, 3000);
         } else {
-            loadUrl(fullParseUrl, callback);
+            loadUrl(null, flag, parseUrl + url, callback);
         }
     }
 
